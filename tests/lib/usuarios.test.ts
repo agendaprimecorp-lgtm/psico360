@@ -10,6 +10,7 @@ let orgA: string;
 let orgB: string;
 
 beforeAll(async () => {
+  await dono.query("delete from audit_logs");
   await dono.query("delete from org_members");
   await dono.query("delete from users");
   await dono.query("delete from organizations");
