@@ -4,6 +4,24 @@
 
 ---
 
+## ⚠️ Documento vigente
+
+A especificação em vigor é
+[`docs/superpowers/specs/2026-09-03-psico360-piloto-design.md`](docs/superpowers/specs/2026-09-03-psico360-piloto-design.md).
+
+Ela **substitui** as premissas de prazo, escopo, precificação e metodologia dos arquivos `01`
+a `05` abaixo, que permanecem no repositório como registro histórico. Correções principais:
+
+- O prazo regulatório assumido (maio de 2025) está desatualizado. A fiscalização punitiva
+  começou em **26 de maio de 2026** e está ativa.
+- O roadmap de 21 semanas foi dimensionado para uma equipe de seis pessoas e não descreve a
+  realidade de execução deste projeto.
+- Instrumento, anonimato, limiares de risco e canal de denúncia foram redefinidos.
+
+Leia a especificação antes dos documentos históricos.
+
+---
+
 ## 📋 Documentação Completa
 
 Todos os arquivos de análise, especificação técnica, guia de implementação e roadmap estão nesta pasta:
@@ -98,4 +116,4 @@ Status: Pronto para Desenvolvimento
 
 ---
 
-**Próximo passo:** Executar `git init` e fazer primeiro commit com esses arquivos.
+**Próximo passo:** Plano de implementação do piloto, a partir da especificação vigente.
