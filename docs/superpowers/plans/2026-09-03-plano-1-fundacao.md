@@ -858,6 +858,7 @@ Criar `lib/usuarios.ts`:
 
 ```typescript
 import type { Pool } from "pg";
+import { comOrganizacao } from "../db/tenant";
 import { protegerSenha } from "./senha";
 
 export type Papel = "SST_ADMIN" | "SST_TECNICO" | "EMPRESA_RH";
@@ -880,15 +881,20 @@ export async function vincular(
   pool: Pool,
   entrada: { userId: string; organizationId: string; papel: Papel },
 ): Promise<void> {
-  await pool.query(
-    `insert into org_members (organization_id, user_id, papel)
-     values ($1, $2, $3)`,
-    [entrada.organizationId, entrada.userId, entrada.papel],
-  );
+  // A insercao PRECISA rodar com o contexto declarado — ver a nota abaixo.
+  await comOrganizacao(pool, entrada.organizationId, async (client) => {
+    await client.query(
+      `insert into org_members (organization_id, user_id, papel)
+       values ($1, $2, $3)`,
+      [entrada.organizationId, entrada.userId, entrada.papel],
+    );
+  });
 }
 ```
 
-**Por que `vincular` funciona sem contexto de organização:** a política `org_members_isolamento` usa apenas `using`, que governa leitura, alteração e remoção. Inserção só seria barrada por uma cláusula `with check`, que não existe aqui — criar vínculo é ação de administração da plataforma, não de tenant. A Task 5 fará o oposto em `audit_logs`, onde a inserção precisa ser amarrada.
+**Por que `vincular` precisa do contexto de organização:** no PostgreSQL, uma política que declara apenas `using`, sem `with check`, usa a expressão de `using` **também** como `with check` em inserções. Sem contexto, `current_setting('app.organization_id', true)` devolve nulo, a comparação não é verdadeira, e a inserção é recusada. Declarar o contexto é, portanto, obrigatório — e é também o comportamento correto: você está inserindo um vínculo *naquela* organização, então é ela que deve estar declarada.
+
+`criarUsuario` não precisa disso porque `users` não tem RLS, pelo motivo explicado na migração.
 
 - [ ] **Step 9: Rodar e ver passar**
 
@@ -1040,27 +1046,27 @@ describe("trilha de auditoria", () => {
     expect(linhas).toHaveLength(0);
   });
 
-  it("não altera registro já gravado", async () => {
-    // Sem politica de update, o Postgres nao lanca erro: simplesmente nao
-    // encontra linha para alterar. E por isso que conferimos rowCount.
-    const afetadas = await comOrganizacao(app, orgA, async (client) => {
-      const { rowCount } = await client.query(
-        "update audit_logs set acao = 'ADULTERADO'",
-      );
-      return rowCount;
-    });
-    expect(afetadas).toBe(0);
+  it("recusa alterar registro já gravado", async () => {
+    // A aplicacao nao recebe grant de update em audit_logs, entao o Postgres
+    // levanta "permission denied" antes mesmo de avaliar politica alguma.
+    // Erro barulhento e melhor que zero linhas em silencio numa trilha de
+    // auditoria.
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("update audit_logs set acao = 'ADULTERADO'");
+      }),
+    ).rejects.toThrow();
 
     const { rows } = await dono.query("select acao from audit_logs");
     expect(rows.map((r) => r.acao)).not.toContain("ADULTERADO");
   });
 
-  it("não apaga registro já gravado", async () => {
-    const afetadas = await comOrganizacao(app, orgA, async (client) => {
-      const { rowCount } = await client.query("delete from audit_logs");
-      return rowCount;
-    });
-    expect(afetadas).toBe(0);
+  it("recusa apagar registro já gravado", async () => {
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("delete from audit_logs");
+      }),
+    ).rejects.toThrow();
 
     const { rowCount } = await dono.query("select 1 from audit_logs");
     expect(rowCount).toBe(1);
@@ -1125,10 +1131,10 @@ create policy audit_logs_escrita on audit_logs
   for insert
   with check (organization_id = current_setting('app.organization_id', true)::uuid);
 
--- Nao existe politica para update nem para delete. A ausencia faz o Postgres
--- nao encontrar linha alguma para essas operacoes: a trilha e somente-anexar
--- do ponto de vista da aplicacao.
-
+-- Nao existe politica para update nem para delete, e o grant abaixo tambem
+-- nao concede essas operacoes. Sao duas camadas: o privilegio recusa antes,
+-- a politica recusaria depois. A trilha e somente-anexar do ponto de vista da
+-- aplicacao, e a tentativa de altera-la levanta erro em vez de falhar calada.
 grant select, insert on audit_logs to psico360_app;
 ```
 
@@ -1234,6 +1240,7 @@ Entrega: um usuário entra pelo navegador, recebe cookie de sessão, e a aplica�
   - `autenticar(pool: Pool, email: string, senha: string): Promise<{ token: string; organizationId: string; userId: string } | null>`
   - `lerSessao(pool: Pool, token: string): Promise<{ userId: string; organizationId: string } | null>`
   - `encerrar(pool: Pool, token: string): Promise<void>`
+- Produces (banco): função `credencial_por_email(text)`, `security definer`, devolvendo `(user_id uuid, senha_hash text, organization_id uuid)` — único ponto do sistema que lê `org_members` sem contexto de organização
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1376,6 +1383,33 @@ create index sessoes_user_idx on sessoes (user_id);
 -- hash SHA-256 — um vazamento do banco nao entrega sessoes validas.
 
 grant select, insert, delete on sessoes to psico360_app;
+
+-- O login enfrenta um problema de partida: para descobrir a organizacao do
+-- usuario e preciso ler org_members, mas org_members esta sob RLS e a RLS
+-- exige justamente a organizacao que ainda nao se sabe. A saida e esta funcao,
+-- que roda com os privilegios do DONO (security definer) e por isso enxerga
+-- org_members — mas devolve APENAS as tres colunas do login, para um unico
+-- email. E a valvula estreita: o unico ponto do sistema que le vinculo sem
+-- contexto, e de proposito.
+--
+-- As alternativas foram descartadas: dar a credencial de dono a aplicacao
+-- daria a ela poder total em producao; afrouxar a politica de org_members
+-- deixaria uma organizacao enumerar usuarios de outra.
+create function credencial_por_email(p_email text)
+returns table (user_id uuid, senha_hash text, organization_id uuid)
+language sql
+security definer
+set search_path = public
+as $$
+  select u.id, u.senha_hash, m.organization_id
+    from users u
+    join org_members m on m.user_id = u.id
+   where u.email = p_email
+   limit 1;
+$$;
+
+revoke all on function credencial_por_email(text) from public;
+grant execute on function credencial_por_email(text) to psico360_app;
 ```
 
 - [ ] **Step 4: Escrever o módulo de sessão**
@@ -1402,12 +1436,11 @@ export async function autenticar(
   email: string,
   senha: string,
 ): Promise<{ token: string; organizationId: string; userId: string } | null> {
+  // Ler org_members diretamente aqui devolveria zero linhas: a politica de RLS
+  // exige a organizacao, que e exatamente o que ainda nao sabemos. A funcao
+  // credencial_por_email resolve isso — ver o comentario na migracao 0005.
   const { rows } = await pool.query(
-    `select u.id, u.senha_hash, m.organization_id
-       from users u
-       join org_members m on m.user_id = u.id
-      where u.email = $1
-      limit 1`,
+    "select user_id, senha_hash, organization_id from credencial_por_email($1)",
     [email.toLowerCase().trim()],
   );
   if (rows.length === 0) return null;
@@ -1421,12 +1454,12 @@ export async function autenticar(
   await pool.query(
     `insert into sessoes (token_hash, user_id, organization_id, expira_em)
      values ($1, $2, $3, $4)`,
-    [embaralhar(token), usuario.id, usuario.organization_id, expiraEm],
+    [embaralhar(token), usuario.user_id, usuario.organization_id, expiraEm],
   );
 
   return {
     token,
-    userId: usuario.id,
+    userId: usuario.user_id,
     organizationId: usuario.organization_id,
   };
 }
