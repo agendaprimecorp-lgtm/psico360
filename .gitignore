@@ -91,3 +91,6 @@ pnpm-lock.yaml
 # Docker
 .dockerignore
 .docker-compose.override.yml
+
+# Espaco de trabalho do executor de planos (nao versionado)
+.superpowers/
