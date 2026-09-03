@@ -39,10 +39,18 @@ Valem para toda tarefa deste plano e dos seguintes. Valores copiados da especifi
 Bloqueiam a Tarefa 2. Não são código.
 
 - [ ] Criar conta em https://neon.com — o plano gratuito atende todo este plano
-- [ ] Criar um projeto chamado `psico360`
-- [ ] Dentro dele, criar dois bancos: `psico360_dev` e `psico360_test`
-- [ ] Criar o papel `psico360_app` **pelo SQL Editor**, com o comando abaixo, em **cada um dos dois bancos**
-- [ ] Montar as quatro strings de conexão: dono e `psico360_app`, para cada um dos dois bancos
+- [ ] Criar um projeto chamado `psico360` e copiar a string de conexão do papel dono
+- [ ] Rodar `NEON_OWNER_URL="<string do dono>" npm run preparar-neon`
+
+O script `scripts/preparar-neon.mjs` faz o resto: cria os bancos `psico360_dev` e
+`psico360_test`, cria o papel `psico360_app` por SQL, concede acesso, testa as quatro
+conexões, **confere que o papel não ignora RLS** e grava o `.env.local`. Ele recusa
+terminar se o papel tiver `BYPASSRLS` ou herdar `neon_superuser`.
+
+Correção registrada: em PostgreSQL o papel pertence ao servidor, não ao banco.
+Existe **um** `psico360_app`, com **uma** senha, usado pelos dois bancos. Uma versão
+anterior deste plano mandava criá-lo duas vezes — a segunda falharia com
+`role already exists`.
 
 > ### ⚠️ O papel da aplicação NÃO pode ser criado pelo botão "Add role"
 >

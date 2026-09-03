@@ -9,7 +9,7 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "montar-env": "node scripts/montar-env.mjs"
+    "preparar-neon": "node scripts/preparar-neon.mjs"
   },
   "dependencies": {
     "argon2": "^0.45.1",
