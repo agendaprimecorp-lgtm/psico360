@@ -90,3 +90,7 @@ build/
 
 # Espaco de trabalho do executor de planos (nao versionado)
 .superpowers/
+
+# Roteiro com senhas do papel da aplicacao - nunca versionar
+NEON-PASSO-A-PASSO.local.txt
+*.local.txt
