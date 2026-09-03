@@ -113,4 +113,36 @@ describe("usuários e vínculos", () => {
     });
     expect(vistos).toHaveLength(0);
   });
+
+  it("sem contexto declarado, não enxerga vínculo algum", async () => {
+    const client = await app.connect();
+    try {
+      const { rows } = await client.query("select id from org_members");
+      expect(rows).toHaveLength(0);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("o papel da aplicação não altera nem apaga vínculo", async () => {
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("update org_members set papel = 'SST_ADMIN'");
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("delete from org_members");
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("o papel da aplicação não lê e-mail nem hash de senha", async () => {
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("select email, senha_hash from users");
+      }),
+    ).rejects.toThrow();
+  });
 });
