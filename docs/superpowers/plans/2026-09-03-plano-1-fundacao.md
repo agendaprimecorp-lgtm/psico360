@@ -64,14 +64,13 @@ anterior deste plano mandava criá-lo duas vezes — a segunda falharia com
 > nunca deve ser dono da tabela, e nunca deve ter `BYPASSRLS`. E registra a saída:
 > papéis criados **por SQL** não recebem `neon_superuser`.
 >
-> Portanto, no **SQL Editor** do Neon, conectado como o papel dono, rodar em cada
-> um dos dois bancos:
+> `scripts/preparar-neon.mjs` já cria o papel por SQL e confere o atributo antes
+> de gravar qualquer coisa. Se precisar fazer à mão, o comando é este, rodado
+> **uma única vez** no SQL Editor (papel pertence ao servidor, não ao banco):
 >
 > ```sql
 > create role psico360_app with login password 'ESCOLHA-UMA-SENHA-FORTE';
 > ```
->
-> Use senhas diferentes para `psico360_dev` e `psico360_test`.
 >
 > A string de conexão desse papel não aparece no painel: monte-a a partir da
 > string do dono, trocando usuário e senha e mantendo host, porta e nome do banco.
@@ -590,7 +589,7 @@ alter table organizations enable row level security;
 -- ignorando RLS para rodar migracoes e preparar testes. Quem sofre a
 -- politica e psico360_app, que nao e dono de nada.
 create policy organizations_isolamento on organizations
-  using (id = current_setting('app.organization_id', true)::uuid);
+  using (id = nullif(current_setting('app.organization_id', true), '')::uuid);
 ```
 
 - [ ] **Step 4: Escrever o portador de contexto de tenant**
@@ -777,7 +776,7 @@ create index org_members_user_idx on org_members (user_id);
 alter table org_members enable row level security;
 
 create policy org_members_isolamento on org_members
-  using (organization_id = current_setting('app.organization_id', true)::uuid);
+  using (organization_id = nullif(current_setting('app.organization_id', true), '')::uuid);
 
 grant select, insert, update, delete on users to psico360_app;
 grant select, insert, update, delete on org_members to psico360_app;
@@ -955,7 +954,7 @@ export async function vincular(
 }
 ```
 
-**Por que `vincular` precisa do contexto de organização:** no PostgreSQL, uma política que declara apenas `using`, sem `with check`, usa a expressão de `using` **também** como `with check` em inserções. Sem contexto, `current_setting('app.organization_id', true)` devolve nulo, a comparação não é verdadeira, e a inserção é recusada. Declarar o contexto é, portanto, obrigatório — e é também o comportamento correto: você está inserindo um vínculo *naquela* organização, então é ela que deve estar declarada.
+**Por que `vincular` precisa do contexto de organização:** no PostgreSQL, uma política que declara apenas `using`, sem `with check`, usa a expressão de `using` **também** como `with check` em inserções. Sem contexto, o parâmetro resolve para nulo — pelo `nullif`, tanto no caso em que nunca foi declarado quanto no caso em que voltou como string vazia após uma transação anterior — a comparação não é verdadeira, e a inserção é recusada. Declarar o contexto é, portanto, obrigatório, e é também o comportamento correto: você está inserindo um vínculo *naquela* organização, então é ela que deve estar declarada.
 
 `criarUsuario` não precisa disso porque `users` não tem RLS, pelo motivo explicado na migração.
 
@@ -1186,13 +1185,13 @@ alter table audit_logs enable row level security;
 
 create policy audit_logs_leitura on audit_logs
   for select
-  using (organization_id = current_setting('app.organization_id', true)::uuid);
+  using (organization_id = nullif(current_setting('app.organization_id', true), '')::uuid);
 
 -- with check amarra a insercao: nao ha como gravar em nome de outra
 -- organizacao, nem por engano nem de proposito.
 create policy audit_logs_escrita on audit_logs
   for insert
-  with check (organization_id = current_setting('app.organization_id', true)::uuid);
+  with check (organization_id = nullif(current_setting('app.organization_id', true), '')::uuid);
 
 -- Nao existe politica para update nem para delete, e o grant abaixo tambem
 -- nao concede essas operacoes. Sao duas camadas: o privilegio recusa antes,
@@ -1233,7 +1232,7 @@ export async function registrar(
     `insert into audit_logs
        (organization_id, user_id, acao, recurso, recurso_id, detalhe)
      values
-       (current_setting('app.organization_id', true)::uuid, $1, $2, $3, $4, $5)`,
+       (nullif(current_setting('app.organization_id', true), '')::uuid, $1, $2, $3, $4, $5)`,
     [
       evento.userId,
       evento.acao,
