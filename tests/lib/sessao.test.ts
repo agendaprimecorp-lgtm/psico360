@@ -102,4 +102,31 @@ describe("sessão", () => {
     );
     expect(await lerSessao(app, sessao!.token)).toBeNull();
   });
+
+  it("escolhe sempre a mesma organização quando há mais de um vínculo", async () => {
+    const orgB = (
+      await dono.query(
+        "insert into organizations (nome, tipo) values ('Consultoria B', 'SST') returning id",
+      )
+    ).rows[0].id;
+
+    const { id } = await criarUsuario(app, {
+      email: "multiplo@consultoria-a.com.br",
+      senha: "senha-de-teste-123",
+      nome: "Múltiplo",
+    });
+    await vincular(app, { userId: id, organizationId: orgA, papel: "SST_ADMIN" });
+    await vincular(app, { userId: id, organizationId: orgB, papel: "SST_TECNICO" });
+
+    // O vinculo com orgA foi criado primeiro; a ordenacao pelo mais antigo deve
+    // devolver sempre ele, em qualquer numero de tentativas.
+    for (let i = 0; i < 3; i++) {
+      const sessao = await autenticar(
+        app,
+        "multiplo@consultoria-a.com.br",
+        "senha-de-teste-123",
+      );
+      expect(sessao!.organizationId).toBe(orgA);
+    }
+  });
 });

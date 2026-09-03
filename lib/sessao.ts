@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Pool } from "pg";
 import { conferirSenha } from "./senha";
 
-const DURACAO_HORAS = 12;
+export const DURACAO_HORAS = 12;
 
 /**
  * O token vai para o cookie do navegador; no banco guardamos apenas o SHA-256

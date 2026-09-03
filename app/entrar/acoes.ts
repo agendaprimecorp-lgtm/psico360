@@ -3,7 +3,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { criarPool } from "@/db/client";
-import { autenticar } from "@/lib/sessao";
+import { autenticar, DURACAO_HORAS } from "@/lib/sessao";
 
 const pool = criarPool(process.env.DATABASE_URL_APP!);
 
@@ -24,10 +24,8 @@ export async function entrar(_anterior: unknown, dados: FormData) {
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
-    maxAge: DURACAO_COOKIE_SEGUNDOS,
+    maxAge: DURACAO_HORAS * 60 * 60,
   });
 
   redirect("/painel");
 }
-
-const DURACAO_COOKIE_SEGUNDOS = 12 * 60 * 60;
