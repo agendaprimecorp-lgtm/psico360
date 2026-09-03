@@ -1,0 +1,93 @@
+# PSICO360 .gitignore
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.production.local
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+
+# Build & Output
+dist/
+build/
+*.egg-info/
+.next/
+.cache/
+out/
+*.min.js
+*.min.css
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Local development
+.env.development
+db.sqlite3
+*.db
+
+# Secrets & Credentials
+secret_key.txt
+private_key.pem
+credentials.json
+.aws/credentials
+.ssh/
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+~*
+
+# IDE specific files
+.c9/
+*.iml
+
+# Backend
+*.egg
+dist/
+build/
+
+# Frontend
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Docker
+.dockerignore
+.docker-compose.override.yml
