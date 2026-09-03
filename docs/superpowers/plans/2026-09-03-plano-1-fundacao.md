@@ -41,8 +41,32 @@ Bloqueiam a Tarefa 2. Não são código.
 - [ ] Criar conta em https://neon.com — o plano gratuito atende todo este plano
 - [ ] Criar um projeto chamado `psico360`
 - [ ] Dentro dele, criar dois bancos: `psico360_dev` e `psico360_test`
-- [ ] No painel do Neon, criar um segundo papel chamado `psico360_app` (além do papel dono que o Neon já cria)
-- [ ] Copiar as quatro strings de conexão: dono e `psico360_app`, para cada um dos dois bancos
+- [ ] Criar o papel `psico360_app` **pelo SQL Editor**, com o comando abaixo, em **cada um dos dois bancos**
+- [ ] Montar as quatro strings de conexão: dono e `psico360_app`, para cada um dos dois bancos
+
+> ### ⚠️ O papel da aplicação NÃO pode ser criado pelo botão "Add role"
+>
+> Papéis criados pelo painel do Neon (Console, CLI ou API) recebem automaticamente
+> membresia em `neon_superuser`, que carrega o atributo `BYPASSRLS`. Um papel de
+> aplicação com `BYPASSRLS` **ignora todas as políticas de Row-Level Security** —
+> o isolamento entre organizações deixaria de existir, silenciosamente, com o
+> sistema aparentando funcionar normalmente.
+>
+> A documentação do próprio Neon registra as duas regras: o papel da aplicação
+> nunca deve ser dono da tabela, e nunca deve ter `BYPASSRLS`. E registra a saída:
+> papéis criados **por SQL** não recebem `neon_superuser`.
+>
+> Portanto, no **SQL Editor** do Neon, conectado como o papel dono, rodar em cada
+> um dos dois bancos:
+>
+> ```sql
+> create role psico360_app with login password 'ESCOLHA-UMA-SENHA-FORTE';
+> ```
+>
+> Use senhas diferentes para `psico360_dev` e `psico360_test`.
+>
+> A string de conexão desse papel não aparece no painel: monte-a a partir da
+> string do dono, trocando usuário e senha e mantendo host, porta e nome do banco.
 
 **Não cole nenhuma dessas strings nesta conversa nem em arquivo versionado.** Elas dão acesso ao banco. O lugar delas é o `.env.local`, que o Git ignora.
 
@@ -407,11 +431,13 @@ A tarefa mais importante do plano. Entrega: um teste que prova que a organizaç�
   `comOrganizacao<T>(pool: Pool, organizationId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>`
   — abre transação, declara `app.organization_id` com `set_config(..., true)`, executa `fn`, confirma ou desfaz.
 
-**Duas notas técnicas que precisam ser entendidas antes de implementar:**
+**Três notas técnicas que precisam ser entendidas antes de implementar:**
 
 1. **O dono de uma tabela ignora RLS.** É por isso que existem dois papéis: se a aplicação conectasse com o papel dono, as políticas não teriam efeito nenhum e os testes passariam por engano. Os testes deste arquivo conectam com `psico360_app` justamente para exercer a política.
 
-2. **Ausência de política não gera erro — gera zero linhas.** Um `update` sem política correspondente não lança exceção; ele simplesmente não encontra linha alguma para alterar. Os testes abaixo verificam `rowCount === 0`, não exceção.
+2. **Um papel com `BYPASSRLS` também ignora RLS** — e é assim que o Neon cria papéis pelo painel, via membresia em `neon_superuser`. Por isso o `psico360_app` é criado por SQL (ver pré-requisitos) e por isso o primeiro teste deste arquivo confere o atributo antes de qualquer outra coisa. Se ele falhar, o papel foi criado pelo caminho errado e nenhum outro teste deste arquivo significa nada.
+
+3. **Ausência de política não gera erro — gera zero linhas.** Um `update` sem política correspondente não lança exceção; ele simplesmente não encontra linha alguma para alterar. Os testes abaixo verificam `rowCount === 0`, não exceção. Isso vale onde a permissão existe; onde a permissão não foi concedida — caso de `audit_logs` na Tarefa 5 — o Postgres levanta erro antes de avaliar política alguma.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -448,6 +474,29 @@ afterAll(async () => {
 });
 
 describe("isolamento por organização", () => {
+  // Este teste vem primeiro de propósito. Se ele falhar, TODOS os outros deste
+  // arquivo passam por engano: um papel com BYPASSRLS — ou que herde
+  // neon_superuser, que o carrega — ignora as políticas silenciosamente, e o
+  // isolamento entre organizações deixa de existir sem nenhum sinal visível.
+  it("o papel da aplicação não ignora RLS nem herda neon_superuser", async () => {
+    const { rows } = await app.query(`
+      select
+        (select rolbypassrls
+           from pg_roles
+          where rolname = current_user) as ignora_rls,
+        exists (
+          select 1
+            from pg_auth_members m
+            join pg_roles concedido on concedido.oid = m.roleid
+            join pg_roles membro    on membro.oid    = m.member
+           where membro.rolname = current_user
+             and concedido.rolname = 'neon_superuser'
+        ) as herda_superuser
+    `);
+    expect(rows[0].ignora_rls).toBe(false);
+    expect(rows[0].herda_superuser).toBe(false);
+  });
+
   it("enxerga a própria organização", async () => {
     const linhas = await comOrganizacao(app, orgA, async (client) => {
       const { rows } = await client.query("select id, nome from organizations");
@@ -584,7 +633,13 @@ npm run migrate:test
 npm test -- tests/db/isolamento.test.ts
 ```
 
-Esperado: 5 testes passam. Se o segundo teste devolver a organização B, a aplicação está conectando com o papel dono — confira `DATABASE_URL_TEST_APP`.
+Esperado: 6 testes passam.
+
+Diagnóstico de falha, em ordem de probabilidade:
+
+- **O primeiro teste falha** (`ignora_rls` verdadeiro, ou `herda_superuser` verdadeiro): o papel `psico360_app` foi criado pelo painel do Neon em vez de por SQL. Apague-o e recrie com `create role` no SQL Editor. Nenhum outro teste deste arquivo tem valor enquanto este falhar.
+- **O terceiro teste devolve a organização B:** a aplicação está conectando com o papel dono — confira `DATABASE_URL_TEST_APP`.
+- **Todos devolvem zero linhas, inclusive o da própria organização:** faltou o `grant` da migração `0001`, ou ele foi aplicado em apenas um dos dois bancos.
 
 - [ ] **Step 6: Aplicar em dev e commitar**
 

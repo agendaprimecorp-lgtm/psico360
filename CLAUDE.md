@@ -11,6 +11,13 @@ para atender requisição de usuário, e é sobre ele que as políticas de RLS i
 Nunca fazer a aplicação conectar com o papel dono — isso anula o isolamento entre
 organizações. Produção carrega apenas `DATABASE_URL_APP`.
 
+O papel `psico360_app` precisa ser criado **por SQL** (`create role ... with login
+password ...`), nunca pelo painel do Neon. Papéis criados pelo painel recebem
+membresia em `neon_superuser`, que carrega o atributo `BYPASSRLS` — e um papel com
+`BYPASSRLS` ignora todas as políticas de RLS silenciosamente, com o sistema
+aparentando funcionar. O primeiro teste de `tests/db/isolamento.test.ts` existe para
+detectar exatamente isso; se ele falhar, nenhum outro teste de isolamento vale nada.
+
 ## Segredos
 
 `.env.local` nunca é versionado; só `.env.example`, sem valores. Conferir antes de
