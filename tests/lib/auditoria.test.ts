@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { criarPool } from "@/db/client";
 import { comOrganizacao } from "@/db/tenant";
 import { registrar } from "@/lib/auditoria";
+import { recusadoPorPrivilegio } from "../ajudantes";
 
 const dono = criarPool(process.env.DATABASE_URL_TEST_OWNER!);
 const app = criarPool(process.env.DATABASE_URL_TEST_APP!);
@@ -93,22 +94,22 @@ describe("trilha de auditoria", () => {
     // levanta "permission denied" antes mesmo de avaliar politica alguma.
     // Erro barulhento e melhor que zero linhas em silencio numa trilha de
     // auditoria.
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query("update audit_logs set acao = 'ADULTERADO'");
       }),
-    ).rejects.toThrow();
+    );
 
     const { rows } = await dono.query("select acao from audit_logs");
     expect(rows.map((r) => r.acao)).not.toContain("ADULTERADO");
   });
 
   it("recusa apagar registro já gravado", async () => {
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query("delete from audit_logs");
       }),
-    ).rejects.toThrow();
+    );
 
     const { rowCount } = await dono.query("select 1 from audit_logs");
     expect(rowCount).toBe(1);
@@ -131,5 +132,20 @@ describe("trilha de auditoria", () => {
       return rows;
     });
     expect(daOrgA).toHaveLength(1);
+  });
+
+  it("a política recusa insert cru em nome de outra organização", async () => {
+    // registrar() nunca aceita organization_id, entao o teste acima prova a API,
+    // nao a barreira do banco. Este prova a barreira: insert cru, com o id de
+    // outra organizacao, dentro do contexto de orgA.
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query(
+          `insert into audit_logs (organization_id, user_id, acao, recurso)
+           values ($1, $2, 'CRIAR', 'empresa')`,
+          [orgB, userId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
   });
 });

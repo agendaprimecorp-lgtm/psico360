@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { criarPool } from "@/db/client";
-import { criarUsuario, vincular } from "@/lib/usuarios";
+import { comOrganizacao } from "@/db/tenant";
+import { criarUsuarioComVinculo } from "@/lib/usuarios";
 import { autenticar, encerrar, lerSessao } from "@/lib/sessao";
 
 const dono = criarPool(process.env.DATABASE_URL_TEST_OWNER!);
@@ -18,12 +19,13 @@ beforeAll(async () => {
     "insert into organizations (nome, tipo) values ('Consultoria A', 'SST') returning id",
   );
   orgA = a.rows[0].id;
-  const { id } = await criarUsuario(app, {
+  await criarUsuarioComVinculo(app, {
     email: "login@consultoria-a.com.br",
     senha: "senha-de-teste-123",
     nome: "Usuário Login",
+    organizationId: orgA,
+    papel: "SST_ADMIN",
   });
-  await vincular(app, { userId: id, organizationId: orgA, papel: "SST_ADMIN" });
 });
 
 afterAll(async () => {
@@ -103,30 +105,65 @@ describe("sessão", () => {
     expect(await lerSessao(app, sessao!.token)).toBeNull();
   });
 
-  it("escolhe sempre a mesma organização quando há mais de um vínculo", async () => {
+  it("escolhe o vínculo mais antigo, não o primeiro inserido", async () => {
     const orgB = (
       await dono.query(
         "insert into organizations (nome, tipo) values ('Consultoria B', 'SST') returning id",
       )
     ).rows[0].id;
 
-    const { id } = await criarUsuario(app, {
+    // Cria o vinculo com orgB PRIMEIRO, para que ele seja o primeiro do heap.
+    const { id } = await criarUsuarioComVinculo(app, {
       email: "multiplo@consultoria-a.com.br",
       senha: "senha-de-teste-123",
       nome: "Múltiplo",
+      organizationId: orgB,
+      papel: "SST_TECNICO",
     });
-    await vincular(app, { userId: id, organizationId: orgA, papel: "SST_ADMIN" });
-    await vincular(app, { userId: id, organizationId: orgB, papel: "SST_TECNICO" });
 
-    // O vinculo com orgA foi criado primeiro; a ordenacao pelo mais antigo deve
-    // devolver sempre ele, em qualquer numero de tentativas.
-    for (let i = 0; i < 3; i++) {
-      const sessao = await autenticar(
-        app,
-        "multiplo@consultoria-a.com.br",
-        "senha-de-teste-123",
+    await comOrganizacao(app, orgA, async (client) => {
+      await client.query(
+        "insert into org_members (organization_id, user_id, papel) values ($1, $2, 'SST_ADMIN')",
+        [orgA, id],
       );
-      expect(sessao!.organizationId).toBe(orgA);
+    });
+
+    // Retroage o vinculo de orgA para antes do de orgB. Agora a ordem fisica
+    // (orgB primeiro) e a cronologica (orgA primeiro) apontam para lados
+    // opostos: sem `order by`, a funcao devolveria orgB e este teste falharia.
+    await dono.query(
+      `update org_members set criado_em = now() - interval '1 day'
+        where user_id = $1 and organization_id = $2`,
+      [id, orgA],
+    );
+
+    const sessao = await autenticar(
+      app,
+      "multiplo@consultoria-a.com.br",
+      "senha-de-teste-123",
+    );
+    expect(sessao!.organizationId).toBe(orgA);
+  });
+
+  it("a função de credencial mantém a ordenação determinística", async () => {
+    // Guarda contra um `create or replace` futuro que desfaca a ordenacao sem
+    // que nenhum teste de comportamento perceba.
+    const { rows } = await dono.query(
+      "select pg_get_functiondef('credencial_por_email(text)'::regprocedure) as def",
+    );
+    expect(rows[0].def).toContain("order by");
+  });
+
+  it("o papel da aplicação não alcança sessoes diretamente", async () => {
+    // Depois da migracao 0006 a tabela so e alcancavel pelas tres funcoes
+    // security definer. Sem isso, `select distinct organization_id from sessoes`
+    // entregaria a lista de todas as organizacoes que ja entraram no sistema.
+    for (const sql of [
+      "select user_id from sessoes",
+      "insert into sessoes (token_hash, user_id, organization_id, expira_em) values ('x', gen_random_uuid(), gen_random_uuid(), now())",
+      "delete from sessoes",
+    ]) {
+      await expect(app.query(sql)).rejects.toMatchObject({ code: "42501" });
     }
   });
 });

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { criarPool } from "@/db/client";
 import { comOrganizacao } from "@/db/tenant";
-import { criarUsuario, vincular } from "@/lib/usuarios";
+import { criarUsuarioComVinculo } from "@/lib/usuarios";
+import { recusadoPorPrivilegio } from "../ajudantes";
 
 const dono = criarPool(process.env.DATABASE_URL_TEST_OWNER!);
 const app = criarPool(process.env.DATABASE_URL_TEST_APP!);
@@ -31,10 +32,12 @@ afterAll(async () => {
 
 describe("usuários e vínculos", () => {
   it("cria usuário sem guardar a senha em claro", async () => {
-    const { id } = await criarUsuario(app, {
+    const { id } = await criarUsuarioComVinculo(app, {
       email: "tecnico@consultoria-a.com.br",
       senha: "senha-de-teste-123",
       nome: "Técnico A",
+      organizationId: orgA,
+      papel: "SST_TECNICO",
     });
     const { rows } = await dono.query(
       "select senha_hash from users where id = $1",
@@ -44,25 +47,33 @@ describe("usuários e vínculos", () => {
   });
 
   it("recusa email repetido", async () => {
-    await criarUsuario(app, {
+    await criarUsuarioComVinculo(app, {
       email: "repetido@consultoria-a.com.br",
       senha: "senha-de-teste-123",
       nome: "Primeiro",
+      organizationId: orgA,
+      papel: "SST_TECNICO",
     });
+    // 23505 e unique_violation: a recusa aqui vem da unicidade global de
+    // users.email, nao de privilegio.
     await expect(
-      criarUsuario(app, {
+      criarUsuarioComVinculo(app, {
         email: "repetido@consultoria-a.com.br",
         senha: "outra-senha-123",
         nome: "Segundo",
+        organizationId: orgA,
+        papel: "SST_TECNICO",
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: "23505" });
   });
 
   it("normaliza o email para minúsculas", async () => {
-    const { id } = await criarUsuario(app, {
+    const { id } = await criarUsuarioComVinculo(app, {
       email: "  MAIUSCULO@Consultoria-A.com.br  ",
       senha: "senha-de-teste-123",
       nome: "Maiúsculo",
+      organizationId: orgA,
+      papel: "SST_TECNICO",
     });
     const { rows } = await dono.query("select email from users where id = $1", [
       id,
@@ -70,14 +81,11 @@ describe("usuários e vínculos", () => {
     expect(rows[0].email).toBe("maiusculo@consultoria-a.com.br");
   });
 
-  it("vincula usuário à organização com papel", async () => {
-    const { id } = await criarUsuario(app, {
+  it("cria o vínculo com a organização e o papel na mesma chamada", async () => {
+    const { id } = await criarUsuarioComVinculo(app, {
       email: "vinculado@consultoria-a.com.br",
       senha: "senha-de-teste-123",
       nome: "Vinculado",
-    });
-    await vincular(app, {
-      userId: id,
       organizationId: orgA,
       papel: "SST_TECNICO",
     });
@@ -93,14 +101,32 @@ describe("usuários e vínculos", () => {
     expect(vinculos[0].papel).toBe("SST_TECNICO");
   });
 
+  it("não deixa usuário órfão quando o vínculo falha", async () => {
+    // Usuario e vinculo sao a mesma transacao. Se o vinculo falha — aqui, papel
+    // fora do check de org_members — o usuario nao fica gravado, e o e-mail nao
+    // fica queimado pela unicidade global de users.email.
+    await expect(
+      criarUsuarioComVinculo(app, {
+        email: "orfao@consultoria-a.com.br",
+        senha: "senha-de-teste-123",
+        nome: "Órfão",
+        organizationId: orgA,
+        papel: "PAPEL_INEXISTENTE" as never,
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+
+    const { rowCount } = await dono.query(
+      "select 1 from users where email = $1",
+      ["orfao@consultoria-a.com.br"],
+    );
+    expect(rowCount).toBe(0);
+  });
+
   it("não expõe o vínculo para outra organização", async () => {
-    const { id } = await criarUsuario(app, {
+    const { id } = await criarUsuarioComVinculo(app, {
       email: "isolado@consultoria-a.com.br",
       senha: "senha-de-teste-123",
       nome: "Isolado",
-    });
-    await vincular(app, {
-      userId: id,
       organizationId: orgA,
       papel: "SST_ADMIN",
     });
@@ -126,24 +152,46 @@ describe("usuários e vínculos", () => {
   });
 
   it("o papel da aplicação não altera nem apaga vínculo", async () => {
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query("update org_members set papel = 'SST_ADMIN'");
       }),
-    ).rejects.toThrow();
+    );
 
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query("delete from org_members");
       }),
-    ).rejects.toThrow();
+    );
   });
 
-  it("o papel da aplicação não lê e-mail nem hash de senha", async () => {
+  it("a política recusa vincular em nome de outra organização", async () => {
+    const { id } = await criarUsuarioComVinculo(app, {
+      email: "divergente@consultoria-a.com.br",
+      senha: "senha-de-teste-123",
+      nome: "Divergente",
+      organizationId: orgA,
+      papel: "SST_TECNICO",
+    });
+
     await expect(
       comOrganizacao(app, orgA, async (client) => {
-        await client.query("select email, senha_hash from users");
+        await client.query(
+          `insert into org_members (organization_id, user_id, papel)
+           values ($1, $2, 'SST_ADMIN')`,
+          [orgB, id],
+        );
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("o papel da aplicação não lê coluna alguma de users", async () => {
+    // Uma consulta por coluna: `select email, senha_hash` reprovaria inteira na
+    // primeira coluna negada, e passaria mesmo com a outra legível.
+    for (const coluna of ["id", "email", "nome", "senha_hash"]) {
+      await recusadoPorPrivilegio(
+        app.query(`select ${coluna} from users`),
+      );
+    }
   });
 });

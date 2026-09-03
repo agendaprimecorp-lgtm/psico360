@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { criarPool } from "@/db/client";
 import { comOrganizacao } from "@/db/tenant";
+import { recusadoPorPrivilegio } from "../ajudantes";
 
 // Dono: prepara o cenário, ignora RLS.
 const dono = criarPool(process.env.DATABASE_URL_TEST_OWNER!);
@@ -91,11 +92,11 @@ describe("isolamento por organização", () => {
   it("não apaga linha de outra organização", async () => {
     // Delete foi revogado do papel da aplicação (0002b): o Postgres recusa
     // por falta de privilégio, antes mesmo de avaliar a política de RLS.
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query("delete from organizations where id = $1", [orgB]);
       }),
-    ).rejects.toThrow();
+    );
 
     const { rowCount } = await dono.query(
       "select 1 from organizations where id = $1",
@@ -117,19 +118,19 @@ describe("isolamento por organização", () => {
   it("o papel da aplicação não cria nem apaga organização", async () => {
     // Criar e apagar organizacao sao atos de plataforma, do papel dono.
     // Sem o privilegio, o Postgres recusa antes de avaliar politica alguma.
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query(
           "insert into organizations (nome, tipo) values ('Intrusa', 'SST')",
         );
       }),
-    ).rejects.toThrow();
+    );
 
-    await expect(
+    await recusadoPorPrivilegio(
       comOrganizacao(app, orgA, async (client) => {
         await client.query("delete from organizations where id = $1", [orgA]);
       }),
-    ).rejects.toThrow();
+    );
 
     const { rowCount } = await dono.query("select 1 from organizations");
     expect(rowCount).toBe(2);

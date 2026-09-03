@@ -1,19 +1,23 @@
 import { config } from "dotenv";
 import { criarPool } from "../db/client";
-import { criarUsuario, vincular } from "../lib/usuarios";
+import { criarUsuarioComVinculo } from "../lib/usuarios";
 
-config({ path: ".env.local" });
+config({ path: ".env.local", quiet: true });
 
 const dono = criarPool(process.env.DATABASE_URL_OWNER!);
 const app = criarPool(process.env.DATABASE_URL_APP!);
 
 async function semear() {
   const email = process.argv[2];
-  const senha = process.argv[3];
-  const nome = process.argv[4] ?? "Administrador";
+  const nome = process.argv[3] ?? "Administrador";
+  const senha = process.env.SEMEAR_SENHA;
 
   if (!email || !senha) {
-    console.error('Uso: npm run semear -- "email@dominio.com" "senha" "Nome"');
+    console.error('Uso: SEMEAR_SENHA="a-senha" npm run semear -- "email@dominio.com" "Nome"');
+    console.error(
+      "A senha vem por variável de ambiente, e não por argumento: argumento de\n" +
+        "linha de comando fica no histórico do shell e na lista de processos.",
+    );
     process.exit(1);
   }
 
@@ -22,10 +26,16 @@ async function semear() {
   );
   const organizationId = rows[0].id;
 
-  const { id } = await criarUsuario(app, { email, senha, nome });
-  await vincular(app, { userId: id, organizationId, papel: "SST_ADMIN" });
+  const { id } = await criarUsuarioComVinculo(app, {
+    email,
+    senha,
+    nome,
+    organizationId,
+    papel: "SST_ADMIN",
+  });
 
   console.log(`Usuário criado: ${email}`);
+  console.log(`Id do usuário: ${id}`);
   console.log(`Organização: ${organizationId}`);
 
   await dono.end();

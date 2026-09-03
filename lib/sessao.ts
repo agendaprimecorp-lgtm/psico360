@@ -1,6 +1,17 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Pool } from "pg";
-import { conferirSenha } from "./senha";
+import { conferirSenha, protegerSenha } from "./senha";
+
+/**
+ * Hash descartável, usado só para gastar o mesmo tempo de CPU quando o e-mail
+ * não existe. Sem isto, o login vira um oráculo: e-mail inexistente responde em
+ * milissegundos, e-mail existente com senha errada gasta o argon2id inteiro — e
+ * a diferença revela quem está cadastrado, apesar da mensagem única na tela.
+ *
+ * Gerado uma vez, na carga do módulo, a partir de um valor aleatório que
+ * ninguém conhece.
+ */
+const HASH_DESCARTAVEL = protegerSenha(randomBytes(32).toString("hex"));
 
 export const DURACAO_HORAS = 12;
 
@@ -24,7 +35,12 @@ export async function autenticar(
     "select user_id, senha_hash, organization_id from credencial_por_email($1)",
     [email.toLowerCase().trim()],
   );
-  if (rows.length === 0) return null;
+  if (rows.length === 0) {
+    // Gasta o mesmo tempo do caminho de senha errada, para que a duração da
+    // resposta não revele se o e-mail existe.
+    await conferirSenha(await HASH_DESCARTAVEL, senha);
+    return null;
+  }
 
   const usuario = rows[0];
   if (!(await conferirSenha(usuario.senha_hash, senha))) return null;
@@ -32,11 +48,15 @@ export async function autenticar(
   const token = randomBytes(32).toString("hex");
   const expiraEm = new Date(Date.now() + DURACAO_HORAS * 60 * 60 * 1000);
 
-  await pool.query(
-    `insert into sessoes (token_hash, user_id, organization_id, expira_em)
-     values ($1, $2, $3, $4)`,
-    [embaralhar(token), usuario.user_id, usuario.organization_id, expiraEm],
-  );
+  // sessoes nao e mais alcancavel diretamente pelo papel da aplicacao: as
+  // quatro funcoes security definer da migracao 0006 sao a unica porta, e cada
+  // uma so toca a linha cujo hash de token o chamador ja conhece.
+  await pool.query("select criar_sessao($1, $2, $3, $4)", [
+    embaralhar(token),
+    usuario.user_id,
+    usuario.organization_id,
+    expiraEm,
+  ]);
 
   return {
     token,
@@ -50,9 +70,7 @@ export async function lerSessao(
   token: string,
 ): Promise<{ userId: string; organizationId: string } | null> {
   const { rows } = await pool.query(
-    `select user_id, organization_id
-       from sessoes
-      where token_hash = $1 and expira_em > now()`,
+    "select user_id, organization_id from sessao_por_token($1)",
     [embaralhar(token)],
   );
   if (rows.length === 0) return null;
@@ -63,7 +81,5 @@ export async function lerSessao(
 }
 
 export async function encerrar(pool: Pool, token: string): Promise<void> {
-  await pool.query("delete from sessoes where token_hash = $1", [
-    embaralhar(token),
-  ]);
+  await pool.query("select encerrar_sessao($1)", [embaralhar(token)]);
 }
