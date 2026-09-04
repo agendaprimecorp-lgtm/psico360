@@ -13,6 +13,7 @@ env/
 .env
 .env.local
 .env.*.local
+.env*.local
 .env.production.local
 
 # IDE & Editor
@@ -83,11 +84,13 @@ credentials.json
 dist/
 build/
 
-# Frontend
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-
 # Docker
 .dockerignore
 .docker-compose.override.yml
+
+# Espaco de trabalho do executor de planos (nao versionado)
+.superpowers/
+
+# Roteiro com senhas do papel da aplicacao - nunca versionar
+NEON-PASSO-A-PASSO.local.txt
+*.local.txt

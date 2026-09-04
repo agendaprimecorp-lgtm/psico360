@@ -39,10 +39,41 @@ Valem para toda tarefa deste plano e dos seguintes. Valores copiados da especifi
 Bloqueiam a Tarefa 2. Não são código.
 
 - [ ] Criar conta em https://neon.com — o plano gratuito atende todo este plano
-- [ ] Criar um projeto chamado `psico360`
-- [ ] Dentro dele, criar dois bancos: `psico360_dev` e `psico360_test`
-- [ ] No painel do Neon, criar um segundo papel chamado `psico360_app` (além do papel dono que o Neon já cria)
-- [ ] Copiar as quatro strings de conexão: dono e `psico360_app`, para cada um dos dois bancos
+- [ ] Criar um projeto chamado `psico360` e copiar a string de conexão do papel dono
+- [ ] Rodar `NEON_OWNER_URL="<string do dono>" npm run preparar-neon`
+
+O script `scripts/preparar-neon.mjs` faz o resto: cria os bancos `psico360_dev` e
+`psico360_test`, cria o papel `psico360_app` por SQL, concede acesso, testa as quatro
+conexões, **confere que o papel não ignora RLS** e grava o `.env.local`. Ele recusa
+terminar se o papel tiver `BYPASSRLS` ou herdar `neon_superuser`.
+
+Correção registrada: em PostgreSQL o papel pertence ao servidor, não ao banco.
+Existe **um** `psico360_app`, com **uma** senha, usado pelos dois bancos. Uma versão
+anterior deste plano mandava criá-lo duas vezes — a segunda falharia com
+`role already exists`.
+
+> ### ⚠️ O papel da aplicação NÃO pode ser criado pelo botão "Add role"
+>
+> Papéis criados pelo painel do Neon (Console, CLI ou API) recebem automaticamente
+> membresia em `neon_superuser`, que carrega o atributo `BYPASSRLS`. Um papel de
+> aplicação com `BYPASSRLS` **ignora todas as políticas de Row-Level Security** —
+> o isolamento entre organizações deixaria de existir, silenciosamente, com o
+> sistema aparentando funcionar normalmente.
+>
+> A documentação do próprio Neon registra as duas regras: o papel da aplicação
+> nunca deve ser dono da tabela, e nunca deve ter `BYPASSRLS`. E registra a saída:
+> papéis criados **por SQL** não recebem `neon_superuser`.
+>
+> `scripts/preparar-neon.mjs` já cria o papel por SQL e confere o atributo antes
+> de gravar qualquer coisa. Se precisar fazer à mão, o comando é este, rodado
+> **uma única vez** no SQL Editor (papel pertence ao servidor, não ao banco):
+>
+> ```sql
+> create role psico360_app with login password 'ESCOLHA-UMA-SENHA-FORTE';
+> ```
+>
+> A string de conexão desse papel não aparece no painel: monte-a a partir da
+> string do dono, trocando usuário e senha e mantendo host, porta e nome do banco.
 
 **Não cole nenhuma dessas strings nesta conversa nem em arquivo versionado.** Elas dão acesso ao banco. O lugar delas é o `.env.local`, que o Git ignora.
 
@@ -407,11 +438,13 @@ A tarefa mais importante do plano. Entrega: um teste que prova que a organizaç�
   `comOrganizacao<T>(pool: Pool, organizationId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>`
   — abre transação, declara `app.organization_id` com `set_config(..., true)`, executa `fn`, confirma ou desfaz.
 
-**Duas notas técnicas que precisam ser entendidas antes de implementar:**
+**Três notas técnicas que precisam ser entendidas antes de implementar:**
 
 1. **O dono de uma tabela ignora RLS.** É por isso que existem dois papéis: se a aplicação conectasse com o papel dono, as políticas não teriam efeito nenhum e os testes passariam por engano. Os testes deste arquivo conectam com `psico360_app` justamente para exercer a política.
 
-2. **Ausência de política não gera erro — gera zero linhas.** Um `update` sem política correspondente não lança exceção; ele simplesmente não encontra linha alguma para alterar. Os testes abaixo verificam `rowCount === 0`, não exceção.
+2. **Um papel com `BYPASSRLS` também ignora RLS** — e é assim que o Neon cria papéis pelo painel, via membresia em `neon_superuser`. Por isso o `psico360_app` é criado por SQL (ver pré-requisitos) e por isso o primeiro teste deste arquivo confere o atributo antes de qualquer outra coisa. Se ele falhar, o papel foi criado pelo caminho errado e nenhum outro teste deste arquivo significa nada.
+
+3. **Ausência de política não gera erro — gera zero linhas.** Um `update` sem política correspondente não lança exceção; ele simplesmente não encontra linha alguma para alterar. Os testes abaixo verificam `rowCount === 0`, não exceção. Isso vale onde a permissão existe; onde a permissão não foi concedida — caso de `audit_logs` na Tarefa 5 — o Postgres levanta erro antes de avaliar política alguma.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -448,6 +481,29 @@ afterAll(async () => {
 });
 
 describe("isolamento por organização", () => {
+  // Este teste vem primeiro de propósito. Se ele falhar, TODOS os outros deste
+  // arquivo passam por engano: um papel com BYPASSRLS — ou que herde
+  // neon_superuser, que o carrega — ignora as políticas silenciosamente, e o
+  // isolamento entre organizações deixa de existir sem nenhum sinal visível.
+  it("o papel da aplicação não ignora RLS nem herda neon_superuser", async () => {
+    const { rows } = await app.query(`
+      select
+        (select rolbypassrls
+           from pg_roles
+          where rolname = current_user) as ignora_rls,
+        exists (
+          select 1
+            from pg_auth_members m
+            join pg_roles concedido on concedido.oid = m.roleid
+            join pg_roles membro    on membro.oid    = m.member
+           where membro.rolname = current_user
+             and concedido.rolname = 'neon_superuser'
+        ) as herda_superuser
+    `);
+    expect(rows[0].ignora_rls).toBe(false);
+    expect(rows[0].herda_superuser).toBe(false);
+  });
+
   it("enxerga a própria organização", async () => {
     const linhas = await comOrganizacao(app, orgA, async (client) => {
       const { rows } = await client.query("select id, nome from organizations");
@@ -533,7 +589,7 @@ alter table organizations enable row level security;
 -- ignorando RLS para rodar migracoes e preparar testes. Quem sofre a
 -- politica e psico360_app, que nao e dono de nada.
 create policy organizations_isolamento on organizations
-  using (id = current_setting('app.organization_id', true)::uuid);
+  using (id = nullif(current_setting('app.organization_id', true), '')::uuid);
 ```
 
 - [ ] **Step 4: Escrever o portador de contexto de tenant**
@@ -584,7 +640,13 @@ npm run migrate:test
 npm test -- tests/db/isolamento.test.ts
 ```
 
-Esperado: 5 testes passam. Se o segundo teste devolver a organização B, a aplicação está conectando com o papel dono — confira `DATABASE_URL_TEST_APP`.
+Esperado: 6 testes passam.
+
+Diagnóstico de falha, em ordem de probabilidade:
+
+- **O primeiro teste falha** (`ignora_rls` verdadeiro, ou `herda_superuser` verdadeiro): o papel `psico360_app` foi criado pelo painel do Neon em vez de por SQL. Apague-o e recrie com `create role` no SQL Editor. Nenhum outro teste deste arquivo tem valor enquanto este falhar.
+- **O terceiro teste devolve a organização B:** a aplicação está conectando com o papel dono — confira `DATABASE_URL_TEST_APP`.
+- **Todos devolvem zero linhas, inclusive o da própria organização:** faltou o `grant` da migração `0001`, ou ele foi aplicado em apenas um dos dois bancos.
 
 - [ ] **Step 6: Aplicar em dev e commitar**
 
@@ -714,7 +776,7 @@ create index org_members_user_idx on org_members (user_id);
 alter table org_members enable row level security;
 
 create policy org_members_isolamento on org_members
-  using (organization_id = current_setting('app.organization_id', true)::uuid);
+  using (organization_id = nullif(current_setting('app.organization_id', true), '')::uuid);
 
 grant select, insert, update, delete on users to psico360_app;
 grant select, insert, update, delete on org_members to psico360_app;
@@ -858,6 +920,7 @@ Criar `lib/usuarios.ts`:
 
 ```typescript
 import type { Pool } from "pg";
+import { comOrganizacao } from "../db/tenant";
 import { protegerSenha } from "./senha";
 
 export type Papel = "SST_ADMIN" | "SST_TECNICO" | "EMPRESA_RH";
@@ -880,15 +943,20 @@ export async function vincular(
   pool: Pool,
   entrada: { userId: string; organizationId: string; papel: Papel },
 ): Promise<void> {
-  await pool.query(
-    `insert into org_members (organization_id, user_id, papel)
-     values ($1, $2, $3)`,
-    [entrada.organizationId, entrada.userId, entrada.papel],
-  );
+  // A insercao PRECISA rodar com o contexto declarado — ver a nota abaixo.
+  await comOrganizacao(pool, entrada.organizationId, async (client) => {
+    await client.query(
+      `insert into org_members (organization_id, user_id, papel)
+       values ($1, $2, $3)`,
+      [entrada.organizationId, entrada.userId, entrada.papel],
+    );
+  });
 }
 ```
 
-**Por que `vincular` funciona sem contexto de organização:** a política `org_members_isolamento` usa apenas `using`, que governa leitura, alteração e remoção. Inserção só seria barrada por uma cláusula `with check`, que não existe aqui — criar vínculo é ação de administração da plataforma, não de tenant. A Task 5 fará o oposto em `audit_logs`, onde a inserção precisa ser amarrada.
+**Por que `vincular` precisa do contexto de organização:** no PostgreSQL, uma política que declara apenas `using`, sem `with check`, usa a expressão de `using` **também** como `with check` em inserções. Sem contexto, o parâmetro resolve para nulo — pelo `nullif`, tanto no caso em que nunca foi declarado quanto no caso em que voltou como string vazia após uma transação anterior — a comparação não é verdadeira, e a inserção é recusada. Declarar o contexto é, portanto, obrigatório, e é também o comportamento correto: você está inserindo um vínculo *naquela* organização, então é ela que deve estar declarada.
+
+`criarUsuario` não precisa disso porque `users` não tem RLS, pelo motivo explicado na migração.
 
 - [ ] **Step 9: Rodar e ver passar**
 
@@ -1040,27 +1108,27 @@ describe("trilha de auditoria", () => {
     expect(linhas).toHaveLength(0);
   });
 
-  it("não altera registro já gravado", async () => {
-    // Sem politica de update, o Postgres nao lanca erro: simplesmente nao
-    // encontra linha para alterar. E por isso que conferimos rowCount.
-    const afetadas = await comOrganizacao(app, orgA, async (client) => {
-      const { rowCount } = await client.query(
-        "update audit_logs set acao = 'ADULTERADO'",
-      );
-      return rowCount;
-    });
-    expect(afetadas).toBe(0);
+  it("recusa alterar registro já gravado", async () => {
+    // A aplicacao nao recebe grant de update em audit_logs, entao o Postgres
+    // levanta "permission denied" antes mesmo de avaliar politica alguma.
+    // Erro barulhento e melhor que zero linhas em silencio numa trilha de
+    // auditoria.
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("update audit_logs set acao = 'ADULTERADO'");
+      }),
+    ).rejects.toThrow();
 
     const { rows } = await dono.query("select acao from audit_logs");
     expect(rows.map((r) => r.acao)).not.toContain("ADULTERADO");
   });
 
-  it("não apaga registro já gravado", async () => {
-    const afetadas = await comOrganizacao(app, orgA, async (client) => {
-      const { rowCount } = await client.query("delete from audit_logs");
-      return rowCount;
-    });
-    expect(afetadas).toBe(0);
+  it("recusa apagar registro já gravado", async () => {
+    await expect(
+      comOrganizacao(app, orgA, async (client) => {
+        await client.query("delete from audit_logs");
+      }),
+    ).rejects.toThrow();
 
     const { rowCount } = await dono.query("select 1 from audit_logs");
     expect(rowCount).toBe(1);
@@ -1117,18 +1185,18 @@ alter table audit_logs enable row level security;
 
 create policy audit_logs_leitura on audit_logs
   for select
-  using (organization_id = current_setting('app.organization_id', true)::uuid);
+  using (organization_id = nullif(current_setting('app.organization_id', true), '')::uuid);
 
 -- with check amarra a insercao: nao ha como gravar em nome de outra
 -- organizacao, nem por engano nem de proposito.
 create policy audit_logs_escrita on audit_logs
   for insert
-  with check (organization_id = current_setting('app.organization_id', true)::uuid);
+  with check (organization_id = nullif(current_setting('app.organization_id', true), '')::uuid);
 
--- Nao existe politica para update nem para delete. A ausencia faz o Postgres
--- nao encontrar linha alguma para essas operacoes: a trilha e somente-anexar
--- do ponto de vista da aplicacao.
-
+-- Nao existe politica para update nem para delete, e o grant abaixo tambem
+-- nao concede essas operacoes. Sao duas camadas: o privilegio recusa antes,
+-- a politica recusaria depois. A trilha e somente-anexar do ponto de vista da
+-- aplicacao, e a tentativa de altera-la levanta erro em vez de falhar calada.
 grant select, insert on audit_logs to psico360_app;
 ```
 
@@ -1164,7 +1232,7 @@ export async function registrar(
     `insert into audit_logs
        (organization_id, user_id, acao, recurso, recurso_id, detalhe)
      values
-       (current_setting('app.organization_id', true)::uuid, $1, $2, $3, $4, $5)`,
+       (nullif(current_setting('app.organization_id', true), '')::uuid, $1, $2, $3, $4, $5)`,
     [
       evento.userId,
       evento.acao,
@@ -1234,6 +1302,7 @@ Entrega: um usuário entra pelo navegador, recebe cookie de sessão, e a aplica�
   - `autenticar(pool: Pool, email: string, senha: string): Promise<{ token: string; organizationId: string; userId: string } | null>`
   - `lerSessao(pool: Pool, token: string): Promise<{ userId: string; organizationId: string } | null>`
   - `encerrar(pool: Pool, token: string): Promise<void>`
+- Produces (banco): função `credencial_por_email(text)`, `security definer`, devolvendo `(user_id uuid, senha_hash text, organization_id uuid)` — único ponto do sistema que lê `org_members` sem contexto de organização
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1376,6 +1445,33 @@ create index sessoes_user_idx on sessoes (user_id);
 -- hash SHA-256 — um vazamento do banco nao entrega sessoes validas.
 
 grant select, insert, delete on sessoes to psico360_app;
+
+-- O login enfrenta um problema de partida: para descobrir a organizacao do
+-- usuario e preciso ler org_members, mas org_members esta sob RLS e a RLS
+-- exige justamente a organizacao que ainda nao se sabe. A saida e esta funcao,
+-- que roda com os privilegios do DONO (security definer) e por isso enxerga
+-- org_members — mas devolve APENAS as tres colunas do login, para um unico
+-- email. E a valvula estreita: o unico ponto do sistema que le vinculo sem
+-- contexto, e de proposito.
+--
+-- As alternativas foram descartadas: dar a credencial de dono a aplicacao
+-- daria a ela poder total em producao; afrouxar a politica de org_members
+-- deixaria uma organizacao enumerar usuarios de outra.
+create function credencial_por_email(p_email text)
+returns table (user_id uuid, senha_hash text, organization_id uuid)
+language sql
+security definer
+set search_path = public
+as $$
+  select u.id, u.senha_hash, m.organization_id
+    from users u
+    join org_members m on m.user_id = u.id
+   where u.email = p_email
+   limit 1;
+$$;
+
+revoke all on function credencial_por_email(text) from public;
+grant execute on function credencial_por_email(text) to psico360_app;
 ```
 
 - [ ] **Step 4: Escrever o módulo de sessão**
@@ -1402,12 +1498,11 @@ export async function autenticar(
   email: string,
   senha: string,
 ): Promise<{ token: string; organizationId: string; userId: string } | null> {
+  // Ler org_members diretamente aqui devolveria zero linhas: a politica de RLS
+  // exige a organizacao, que e exatamente o que ainda nao sabemos. A funcao
+  // credencial_por_email resolve isso — ver o comentario na migracao 0005.
   const { rows } = await pool.query(
-    `select u.id, u.senha_hash, m.organization_id
-       from users u
-       join org_members m on m.user_id = u.id
-      where u.email = $1
-      limit 1`,
+    "select user_id, senha_hash, organization_id from credencial_por_email($1)",
     [email.toLowerCase().trim()],
   );
   if (rows.length === 0) return null;
@@ -1421,12 +1516,12 @@ export async function autenticar(
   await pool.query(
     `insert into sessoes (token_hash, user_id, organization_id, expira_em)
      values ($1, $2, $3, $4)`,
-    [embaralhar(token), usuario.id, usuario.organization_id, expiraEm],
+    [embaralhar(token), usuario.user_id, usuario.organization_id, expiraEm],
   );
 
   return {
     token,
-    userId: usuario.id,
+    userId: usuario.user_id,
     organizationId: usuario.organization_id,
   };
 }
